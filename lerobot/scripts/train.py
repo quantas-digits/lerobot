@@ -255,6 +255,7 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
 
     logging.info("make_policy")
     policy = make_policy(hydra_cfg=cfg, dataset_stats=offline_dataset.stats)
+    offline_dataset.delta_timestamps = policy.make_delta_timestamps(eval_env.fps)
 
     # Create optimizer and scheduler
     # Temporary hack to move optimizer out of policy
