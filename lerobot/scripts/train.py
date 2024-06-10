@@ -342,7 +342,7 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
                     start_seed=cfg.seed,
                 )
             log_eval_info(logger, eval_info["aggregated"], step, cfg, offline_dataset, is_offline=True)
-            if cfg.wandb.enable:
+            if cfg.wandb.enable or cfg.tensorboard.enable:
                 logger.log_video(eval_info["video_paths"][0], step, mode="eval")
             logging.info("Resume training")
 
