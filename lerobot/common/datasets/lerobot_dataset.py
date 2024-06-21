@@ -49,7 +49,14 @@ class LeRobotDataset(torch.utils.data.Dataset):
         image_transforms: Callable | None = None,
         delta_timestamps: dict[list[float]] | None = None,
         video_backend: str | None = None,
+        use_cache: bool = False,
     ):
+        """
+        Args:
+            use_cache: Enable this to cache all items as tensors for faster data loading after the first
+                epoch. Useful if you have a small enough dataset to fit into memory. You may set multiple
+                workers for the PyTorch Dataloader but remember to set persistent_workers=True.
+        """
         super().__init__()
         self.repo_id = repo_id
         self.version = version
@@ -71,6 +78,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         if self.video:
             self.videos_dir = load_videos(repo_id, version, root)
             self.video_backend = video_backend if video_backend is not None else "pyav"
+        self.cache = {} if use_cache else None
 
     @property
     def fps(self) -> int:
@@ -134,25 +142,30 @@ class LeRobotDataset(torch.utils.data.Dataset):
         return self.num_samples
 
     def __getitem__(self, idx):
-        item = self.hf_dataset[idx]
+        if self.cache is not None and idx in self.cache:
+            item = self.cache[idx]
+        else:
+            item = self.hf_dataset[idx]
 
-        if self.delta_timestamps is not None:
-            item = load_previous_and_future_frames(
-                item,
-                self.hf_dataset,
-                self.episode_data_index,
-                self.delta_timestamps,
-                self.tolerance_s,
-            )
+            if self.delta_timestamps is not None:
+                item = load_previous_and_future_frames(
+                    item,
+                    self.hf_dataset,
+                    self.episode_data_index,
+                    self.delta_timestamps,
+                    self.tolerance_s,
+                )
 
-        if self.video:
-            item = load_from_videos(
-                item,
-                self.video_frame_keys,
-                self.videos_dir,
-                self.tolerance_s,
-                self.video_backend,
-            )
+            if self.video:
+                item = load_from_videos(
+                    item,
+                    self.video_frame_keys,
+                    self.videos_dir,
+                    self.tolerance_s,
+                    self.video_backend,
+                )
+            if self.cache is not None:
+                self.cache[idx] = item
 
         if self.image_transforms is not None:
             for cam in self.camera_keys:

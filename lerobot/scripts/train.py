@@ -381,6 +381,7 @@ def train(cfg: DictConfig, out_dir: str | None = None, job_name: str | None = No
     dataloader = torch.utils.data.DataLoader(
         offline_dataset,
         num_workers=cfg.training.num_workers,
+        persistent_workers=cfg.training.dataloader_persistent_workers,
         batch_size=cfg.training.batch_size,
         shuffle=shuffle,
         sampler=sampler,
