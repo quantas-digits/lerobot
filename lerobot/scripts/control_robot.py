@@ -271,9 +271,6 @@ def record_dataset(
         now = time.perf_counter()
         observation, action = robot.teleop_step(record_data=True)
 
-        if not is_headless:
-            image_keys = [key for key in observation if "image" in key]
-
         dt_s = time.perf_counter() - now
         busy_wait(1 / fps - dt_s)
 
@@ -569,7 +566,6 @@ def run_policy(robot: Robot, policy: torch.nn.Module, hydra_cfg: DictConfig, run
         now = time.perf_counter()
 
         observation = robot.capture_observation()
-
         with (
             torch.inference_mode(),
             torch.autocast(device_type=device.type)
@@ -579,6 +575,16 @@ def run_policy(robot: Robot, policy: torch.nn.Module, hydra_cfg: DictConfig, run
             # add batch dimension to 1
             for name in observation:
                 observation[name] = observation[name].unsqueeze(0)
+
+            if "dataset_index" in hydra_cfg.policy.input_shapes:
+                logging.info(
+                    "Multiple datasets were provided. The following mapping was applied during training:"
+                )
+                for i, dataset_name in enumerate(hydra_cfg.dataset_repo_id):
+                    logging.info(f"{dataset_name}: {i}")
+                logging.info("Please provide the index of the dataset you want to use for evaluation.")
+                dataset_index = int(input("Enter the index of the dataset you want to use: "))
+                observation["dataset_index"] = torch.tensor([dataset_index])
 
             if device.type == "mps":
                 for name in observation:

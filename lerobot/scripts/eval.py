@@ -44,9 +44,9 @@ https://huggingface.co/lerobot/diffusion_pusht/tree/main.
 import argparse
 import json
 import logging
+import os
 import threading
 import time
-from contextlib import nullcontext
 from copy import deepcopy
 from datetime import datetime as dt
 from pathlib import Path
@@ -80,6 +80,7 @@ def rollout(
     return_observations: bool = False,
     render_callback: Callable[[gym.vector.VectorEnv], None] | None = None,
     enable_progbar: bool = False,
+    dataset_index: int | None = None,
 ) -> dict:
     """Run a batched policy rollout once through a batch of environments.
 
@@ -110,6 +111,7 @@ def rollout(
         render_callback: Optional rendering callback to be used after the environments are reset, and after
             every step.
         enable_progbar: Enable a progress bar over rollout steps.
+        dataset_index: The index of the dataset to use for conditioning in the case of a multitask policy.
     Returns:
         The dictionary described above.
     """
@@ -144,6 +146,8 @@ def rollout(
         observation = preprocess_observation(observation)
         if return_observations:
             all_observations.append(deepcopy(observation))
+        if dataset_index is not None:
+            observation["dataset_index"] = torch.full((env.num_envs,), dataset_index)
 
         observation = {key: observation[key].to(device, non_blocking=True) for key in observation}
 
@@ -212,6 +216,7 @@ def eval_policy(
     start_seed: int | None = None,
     enable_progbar: bool = False,
     enable_inner_progbar: bool = False,
+    dataset_index: int | None = None,
 ) -> dict:
     """
     Args:
@@ -286,6 +291,7 @@ def eval_policy(
             return_observations=return_episode_data,
             render_callback=render_frame if max_episodes_rendered > 0 else None,
             enable_progbar=enable_inner_progbar,
+            dataset_index=dataset_index,
         )
 
         # Figure out where in each rollout sequence the first done condition was encountered (results after
@@ -447,6 +453,7 @@ def main(
     hydra_cfg_path: str | None = None,
     out_dir: str | None = None,
     config_overrides: list[str] | None = None,
+    accelerator: any = None,
 ):
     assert (pretrained_policy_path is None) ^ (hydra_cfg_path is None)
     if pretrained_policy_path is not None:
@@ -457,12 +464,25 @@ def main(
     if out_dir is None:
         out_dir = f"outputs/eval/{dt.now().strftime('%Y-%m-%d/%H-%M-%S')}_{hydra_cfg.env.name}_{hydra_cfg.policy.name}"
 
-    # Check device is available
-    device = get_safe_torch_device(hydra_cfg.device, log=True)
+    dataset_index = None
+    if not isinstance(hydra_cfg.dataset_repo_id, str):
+        logging.info("Multiple datasets were provided. The following mapping was applied during training:")
+        for i, dataset_name in enumerate(hydra_cfg.dataset_repo_id):
+            logging.info(f"{dataset_name}: {i}")
+        dataset_index = int(
+            input("Please provide the index of the dataset you want to use for evaluation : ")
+        )
+        assert 0 <= dataset_index < len(hydra_cfg.dataset_repo_id), "Invalid dataset index."
+        logging.info(f"The current task is {hydra_cfg.env.task}.")
+        task = input("If you wish to change it provide the new task name, otherwise press Enter: ")
+        if task:
+            hydra_cfg.env.task = task
 
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     set_global_seed(hydra_cfg.seed)
+
+    device = accelerator.device if accelerator else get_safe_torch_device(hydra_cfg.device, log=True)
 
     log_output_dir(out_dir)
 
@@ -479,16 +499,22 @@ def main(
     assert isinstance(policy, nn.Module)
     policy.eval()
 
-    with torch.no_grad(), torch.autocast(device_type=device.type) if hydra_cfg.use_amp else nullcontext():
+    if accelerator:
+        policy = accelerator.prepare_model(policy)
+
+    policy.to(device)
+
+    with torch.no_grad():
         info = eval_policy(
             env,
-            policy,
+            policy if accelerator is None else accelerator.unwrap_model(policy, keep_fp32_wrapper=True),
             hydra_cfg.eval.n_episodes,
             max_episodes_rendered=10,
             videos_dir=Path(out_dir) / "videos",
             start_seed=hydra_cfg.seed,
             enable_progbar=True,
             enable_inner_progbar=True,
+            dataset_index=dataset_index,
         )
     print(info["aggregated"])
 
@@ -569,8 +595,20 @@ if __name__ == "__main__":
             args.pretrained_policy_name_or_path, revision=args.revision
         )
 
-        main(
-            pretrained_policy_path=pretrained_policy_path,
-            out_dir=args.out_dir,
-            config_overrides=args.overrides,
-        )
+        if "ACCELERATE_MIXED_PRECISION" in os.environ:
+            import accelerate
+
+            accelerator = accelerate.Accelerator()
+            main(
+                pretrained_policy_path=pretrained_policy_path,
+                out_dir=args.out_dir,
+                config_overrides=args.overrides,
+                accelerator=accelerator,
+            )
+
+        else:
+            main(
+                pretrained_policy_path=pretrained_policy_path,
+                out_dir=args.out_dir,
+                config_overrides=args.overrides,
+            )
