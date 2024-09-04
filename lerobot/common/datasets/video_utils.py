@@ -26,6 +26,19 @@ import torch
 import torchvision
 from datasets.features.features import register_feature
 
+import fractions
+import av
+import av.container
+import av.stream
+import av.video.frame
+import queue
+import threading
+import numpy
+import time
+
+logging.getLogger('libav').setLevel(logging.ERROR)
+logging.getLogger().setLevel(5)
+
 
 def load_from_videos(
     item: dict[str, torch.Tensor],
@@ -126,6 +139,9 @@ def decode_video_frames_torchvision(
 
     if backend == "pyav":
         reader.container.close()
+        
+        for stream in reader.container.streams:
+            stream.close()
 
     reader = None
 
@@ -162,6 +178,7 @@ def decode_video_frames_torchvision(
     return closest_frames
 
 
+# deprecated, use get_video_encoder instead
 def encode_video_frames(
     imgs_dir: Path,
     video_path: Path,
@@ -215,6 +232,102 @@ def encode_video_frames(
             f"Video encoding did not work. File not found: {video_path}. "
             f"Try running the command manually to debug: `{''.join(ffmpeg_cmd)}`"
         )
+
+
+def get_video_encoder(
+    video_path: Path, 
+    fps: int = 30, 
+    width: int = 1280, 
+    height: int = 720,
+    vcodec: str = "libsvtav1",
+    pix_fmt: str = "yuv420p",
+    options: dict[str, str] | None = None,
+    nice: int = 0,
+):
+    q = queue.Queue()
+    
+    def thread():
+        nonlocal options
+
+        # ffmpeg -f image2 -r 30 -i imgs_dir/frame_%06d.png -vcodec libsvtav1 -pix_fmt yuv420p -g 2 -crf 30 -loglevel error -y imgs_dir.mp4
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+
+        container: av.container.OutputContainer = av.open(file=str(video_path), mode="w")
+        
+        if options is None:
+            options = {
+                "g": str(2),
+                "crf": str(30),
+                "preset": str(10),
+            }
+        
+        stream: av.stream.Stream = container.add_stream(vcodec, rate=fps, options=options)
+        stream.pix_fmt = pix_fmt
+
+        stream.width = width
+        stream.height = height
+
+        VIDEO_PTIME = 1 / fps
+        VIDEO_CLOCK_RATE = 90000
+
+        timestamp = 0
+
+        while True:
+            if nice:
+                time.sleep(nice)
+            image = q.get()
+            if image is None:
+                break
+            # print(timestamp)
+
+            frame = av.video.VideoFrame.from_ndarray(image)
+            
+            frame.pts = timestamp
+            frame.time_base = fractions.Fraction(1, VIDEO_CLOCK_RATE)
+            
+            timestamp += int(VIDEO_PTIME * VIDEO_CLOCK_RATE)
+
+            for packet in stream.encode(frame):
+                container.mux(packet)
+
+            q.task_done()
+            
+        # Stop
+        for packet in stream.encode(None):
+            container.mux(packet)
+
+        container.close()
+        for stream in container.streams:
+            stream.close()
+        container = None
+        
+        q.task_done()
+    
+    threading.Thread(target=thread, args=(), daemon=True).start()
+
+    # usage: q.put(image)
+
+    return q
+
+
+def save_images_to_video(
+    imgs_array: numpy.array, 
+    video_path: Path, 
+    fps: int = 30, 
+    width: int = 1280, 
+    height: int = 720,
+    vcodec: str = "libsvtav1",
+    pix_fmt: str = "yuv420p",
+    options: dict[str, str] | None = None,
+    nice: int = 0,
+):
+    q = get_video_encoder(video_path, fps, width, height, vcodec, pix_fmt, options, nice)
+
+    for img_array in imgs_array:
+        q.put(img_array)
+        
+    q.put(None)
+    q.join()
 
 
 @dataclass

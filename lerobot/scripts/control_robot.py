@@ -99,11 +99,11 @@ python lerobot/scripts/control_robot.py record \
 """
 
 import argparse
-import concurrent.futures
 import json
 import logging
 import os
 import platform
+import queue
 import shutil
 import time
 import traceback
@@ -124,7 +124,7 @@ from lerobot.common.datasets.lerobot_dataset import CODEBASE_VERSION, LeRobotDat
 from lerobot.common.datasets.push_dataset_to_hub.aloha_hdf5_format import to_hf_dataset
 from lerobot.common.datasets.push_dataset_to_hub.utils import concatenate_episodes, get_default_encoding
 from lerobot.common.datasets.utils import calculate_episode_data_index, create_branch
-from lerobot.common.datasets.video_utils import encode_video_frames
+from lerobot.common.datasets.video_utils import get_video_encoder
 from lerobot.common.policies.factory import make_policy
 from lerobot.common.robot_devices.robots.factory import make_robot
 from lerobot.common.robot_devices.robots.utils import Robot
@@ -418,194 +418,182 @@ def record(
 
         timestamp = time.perf_counter() - start_warmup_t
 
-    # Save images using threads to reach high fps (30 and more)
-    # Using `with` to exist smoothly if an execption is raised.
-    # Using only 4 worker threads to avoid blocking the main thread.
-    futures = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=num_image_writers) as executor:
-        # Start recording all episodes
-        while episode_index < num_episodes:
-            logging.info(f"Recording episode {episode_index}")
-            say(f"Recording episode {episode_index}")
-            ep_dict = {}
-            frame_index = 0
-            timestamp = 0
-            start_episode_t = time.perf_counter()
-            while timestamp < episode_time_s:
-                start_loop_t = time.perf_counter()
+    encoder_q: dict[queue.Queue] | None = None
+    # Start recording all episodes
+    while episode_index < num_episodes:
+        logging.info(f"Recording episode {episode_index}")
+        say(f"Recording episode {episode_index}")
+        ep_dict = {}
+        frame_index = 0
+        timestamp = 0
+        start_episode_t = time.perf_counter()
+        while timestamp < episode_time_s:
+            start_loop_t = time.perf_counter()
 
-                if policy is None:
-                    observation, action = robot.teleop_step(record_data=True)
-                else:
-                    observation = robot.capture_observation()
+            if policy is None:
+                observation, action = robot.teleop_step(record_data=True)
+            else:
+                observation = robot.capture_observation()
 
-                image_keys = [key for key in observation if "image" in key]
-                not_image_keys = [key for key in observation if "image" not in key]
-
+            image_keys = [key for key in observation if "image" in key]
+            not_image_keys = [key for key in observation if "image" not in key]
+            
+            if encoder_q is None:
+                encoder_q = {}
                 for key in image_keys:
-                    futures += [
-                        executor.submit(
-                            save_image, observation[key], key, frame_index, episode_index, videos_dir
-                        )
-                    ]
+                    fname = f"{key}_episode_{episode_index:06d}.mp4"
+                    video_path = local_dir / "videos" / fname
+                    if video_path.exists():
+                        video_path.unlink()
+                    encoder_q[key] = get_video_encoder(video_path, fps, observation[key].shape[2], observation[key].shape[1], options={
+                        "crf": str(30),
+                        "preset": str(12),
+                    })
+        
+            for key in image_keys:
+                encoder_q[key].put(observation[key].permute((1, 2, 0)).numpy()) # CHW to HWC
 
-                if not is_headless():
-                    image_keys = [key for key in observation if "image" in key]
-                    for key in image_keys:
-                        cv2.imshow(key, cv2.cvtColor(observation[key].numpy(), cv2.COLOR_RGB2BGR))
-                    cv2.waitKey(1)
+            if not is_headless():
+                image_keys = [key for key in observation if "image" in key]
+                for key in image_keys:
+                    cv2.imshow(key, cv2.cvtColor(observation[key].numpy(), cv2.COLOR_RGB2BGR))
+                cv2.waitKey(1)
 
-                for key in not_image_keys:
-                    if key not in ep_dict:
-                        ep_dict[key] = []
-                    ep_dict[key].append(observation[key])
+            for key in not_image_keys:
+                if key not in ep_dict:
+                    ep_dict[key] = []
+                ep_dict[key].append(observation[key])
 
-                if policy is not None:
-                    with (
-                        torch.inference_mode(),
-                        torch.autocast(device_type=device.type)
-                        if device.type == "cuda" and hydra_cfg.use_amp
-                        else nullcontext(),
-                    ):
-                        # Convert to pytorch format: channel first and float32 in [0,1] with batch dimension
-                        for name in observation:
-                            if "image" in name:
-                                observation[name] = observation[name].type(torch.float32) / 255
-                                observation[name] = observation[name].permute(2, 0, 1).contiguous()
-                            observation[name] = observation[name].unsqueeze(0)
-                            observation[name] = observation[name].to(device)
+            if policy is not None:
+                with (
+                    torch.inference_mode(),
+                    torch.autocast(device_type=device.type)
+                    if device.type == "cuda" and hydra_cfg.use_amp
+                    else nullcontext(),
+                ):
+                    # Convert to pytorch format: channel first and float32 in [0,1] with batch dimension
+                    for name in observation:
+                        if "image" in name:
+                            observation[name] = observation[name].type(torch.float32) / 255
+                            observation[name] = observation[name].permute(2, 0, 1).contiguous()
+                        observation[name] = observation[name].unsqueeze(0)
+                        observation[name] = observation[name].to(device)
 
-                        # Compute the next action with the policy
-                        # based on the current observation
-                        action = policy.select_action(observation)
+                    # Compute the next action with the policy
+                    # based on the current observation
+                    action = policy.select_action(observation)
 
-                        # Remove batch dimension
-                        action = action.squeeze(0)
+                    # Remove batch dimension
+                    action = action.squeeze(0)
 
-                        # Move to cpu, if not already the case
-                        action = action.to("cpu")
+                    # Move to cpu, if not already the case
+                    action = action.to("cpu")
 
-                    # Order the robot to move
-                    robot.send_action(action)
-                    action = {"action": action}
+                # Order the robot to move
+                robot.send_action(action)
+                action = {"action": action}
 
-                for key in action:
-                    if key not in ep_dict:
-                        ep_dict[key] = []
-                    ep_dict[key].append(action[key])
+            for key in action:
+                if key not in ep_dict:
+                    ep_dict[key] = []
+                ep_dict[key].append(action[key])
 
-                frame_index += 1
+            frame_index += 1
 
-                dt_s = time.perf_counter() - start_loop_t
-                busy_wait(1 / fps - dt_s)
+            dt_s = time.perf_counter() - start_loop_t
+            busy_wait(1 / fps - dt_s)
 
-                dt_s = time.perf_counter() - start_loop_t
-                log_control_info(robot, dt_s, fps=fps)
+            dt_s = time.perf_counter() - start_loop_t
+            log_control_info(robot, dt_s, fps=fps)
 
-                timestamp = time.perf_counter() - start_episode_t
+            timestamp = time.perf_counter() - start_episode_t
+            if exit_early:
+                exit_early = False
+                break
+
+        if not stop_recording:
+            # Start resetting env while the executor are finishing
+            logging.info("Reset the environment")
+            say("Reset the environment")
+
+        timestamp = 0
+        start_vencod_t = time.perf_counter()
+
+        # During env reset we save the data and encode the videos
+        num_frames = frame_index
+
+        for key in image_keys:
+            # Store the reference to the video frame, even tho the videos are not yet encoded
+            ep_dict[key] = []
+            for i in range(num_frames):
+                ep_dict[key].append({"path": f"videos/{fname}", "timestamp": i / fps})
+
+        for key in not_image_keys:
+            ep_dict[key] = torch.stack(ep_dict[key])
+
+        for key in action:
+            ep_dict[key] = torch.stack(ep_dict[key])
+
+        ep_dict["episode_index"] = torch.tensor([episode_index] * num_frames)
+        ep_dict["frame_index"] = torch.arange(0, num_frames, 1)
+        ep_dict["timestamp"] = torch.arange(0, num_frames, 1) / fps
+
+        done = torch.zeros(num_frames, dtype=torch.bool)
+        done[-1] = True
+        ep_dict["next.done"] = done
+
+        ep_path = episodes_dir / f"episode_{episode_index}.pth"
+        print("Saving episode dictionary...")
+        torch.save(ep_dict, ep_path)
+    
+        if encoder_q:
+            for key in encoder_q:
+                encoder_q[key].put(None)
+            for key in encoder_q:
+                if encoder_q[key].qsize() > 0:
+                    with tqdm.tqdm(total=encoder_q[key].qsize(), desc="Saving images") as pbar:
+                        while encoder_q[key].qsize() > 0:
+                            pbar.update((pbar.total - encoder_q[key].qsize()) - pbar.n)
+                            time.sleep(0.1)
+                encoder_q[key].join()
+
+        rec_info = {
+            "last_episode_index": episode_index,
+        }
+        with open(rec_info_path, "w") as f:
+            json.dump(rec_info, f)
+
+        is_last_episode = stop_recording or (episode_index == (num_episodes - 1))
+
+        # Wait if necessary
+        with tqdm.tqdm(total=reset_time_s, desc="Waiting") as pbar:
+            while timestamp < reset_time_s and not is_last_episode:
+                time.sleep(1)
+                timestamp = time.perf_counter() - start_vencod_t
+                pbar.update(1)
                 if exit_early:
                     exit_early = False
                     break
 
-            if not stop_recording:
-                # Start resetting env while the executor are finishing
-                logging.info("Reset the environment")
-                say("Reset the environment")
+        # Skip updating episode index which forces re-recording episode
+        if rerecord_episode:
+            rerecord_episode = False
+            continue
 
-            timestamp = 0
-            start_vencod_t = time.perf_counter()
+        episode_index += 1
 
-            # During env reset we save the data and encode the videos
-            num_frames = frame_index
-
-            for key in image_keys:
-                tmp_imgs_dir = videos_dir / f"{key}_episode_{episode_index:06d}"
-                fname = f"{key}_episode_{episode_index:06d}.mp4"
-                video_path = local_dir / "videos" / fname
-                if video_path.exists():
-                    video_path.unlink()
-                # Store the reference to the video frame, even tho the videos are not yet encoded
-                ep_dict[key] = []
-                for i in range(num_frames):
-                    ep_dict[key].append({"path": f"videos/{fname}", "timestamp": i / fps})
-
-            for key in not_image_keys:
-                ep_dict[key] = torch.stack(ep_dict[key])
-
-            for key in action:
-                ep_dict[key] = torch.stack(ep_dict[key])
-
-            ep_dict["episode_index"] = torch.tensor([episode_index] * num_frames)
-            ep_dict["frame_index"] = torch.arange(0, num_frames, 1)
-            ep_dict["timestamp"] = torch.arange(0, num_frames, 1) / fps
-
-            done = torch.zeros(num_frames, dtype=torch.bool)
-            done[-1] = True
-            ep_dict["next.done"] = done
-
-            ep_path = episodes_dir / f"episode_{episode_index}.pth"
-            print("Saving episode dictionary...")
-            torch.save(ep_dict, ep_path)
-
-            rec_info = {
-                "last_episode_index": episode_index,
-            }
-            with open(rec_info_path, "w") as f:
-                json.dump(rec_info, f)
-
-            is_last_episode = stop_recording or (episode_index == (num_episodes - 1))
-
-            # Wait if necessary
-            with tqdm.tqdm(total=reset_time_s, desc="Waiting") as pbar:
-                while timestamp < reset_time_s and not is_last_episode:
-                    time.sleep(1)
-                    timestamp = time.perf_counter() - start_vencod_t
-                    pbar.update(1)
-                    if exit_early:
-                        exit_early = False
-                        break
-
-            # Skip updating episode index which forces re-recording episode
-            if rerecord_episode:
-                rerecord_episode = False
-                continue
-
-            episode_index += 1
-
-            if is_last_episode:
-                logging.info("Done recording")
-                say("Done recording", blocking=True)
-                if not is_headless():
-                    listener.stop()
-
-                logging.info("Waiting for threads writing the images on disk to terminate...")
-                for _ in tqdm.tqdm(
-                    concurrent.futures.as_completed(futures), total=len(futures), desc="Writting images"
-                ):
-                    pass
-                break
+        if is_last_episode:
+            logging.info("Done recording")
+            say("Done recording", blocking=True)
+            if not is_headless():
+                listener.stop()
+            break
 
     robot.disconnect()
     if not is_headless():
         cv2.destroyAllWindows()
 
     num_episodes = episode_index
-
-    logging.info("Encoding videos")
-    say("Encoding videos")
-    # Use ffmpeg to convert frames stored as png into mp4 videos
-    for episode_index in tqdm.tqdm(range(num_episodes)):
-        for key in image_keys:
-            tmp_imgs_dir = videos_dir / f"{key}_episode_{episode_index:06d}"
-            fname = f"{key}_episode_{episode_index:06d}.mp4"
-            video_path = local_dir / "videos" / fname
-            if video_path.exists():
-                # Skip if video is already encoded. Could be the case when resuming data recording.
-                continue
-            # note: `encode_video_frames` is a blocking call. Making it asynchronous shouldn't speedup encoding,
-            # since video encoding with ffmpeg is already using multithreading.
-            encode_video_frames(tmp_imgs_dir, video_path, fps, overwrite=True)
-            shutil.rmtree(tmp_imgs_dir)
 
     logging.info("Concatenating episodes")
     ep_dicts = []
