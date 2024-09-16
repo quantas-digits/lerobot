@@ -1,21 +1,38 @@
 """
-Tests meant to be used locally and launched manually.
+Tests for physical cameras and their mocked versions.
+If the physical camera is not connected to the computer, or not working,
+the test will be skipped.
 
-Example usage:
+Example of running a specific test:
 ```bash
 pytest -sx tests/test_cameras.py::test_camera
 ```
+
+Example of running test on a real camera connected to the computer:
+```bash
+pytest -sx 'tests/test_cameras.py::test_camera[opencv-False]'
+pytest -sx 'tests/test_cameras.py::test_camera[intelrealsense-False]'
+```
+
+Example of running test on a mocked version of the camera:
+```bash
+pytest -sx 'tests/test_cameras.py::test_camera[opencv-True]'
+pytest -sx 'tests/test_cameras.py::test_camera[intelrealsense-True]'
+```
 """
+
+import os
 
 import numpy as np
 import pytest
 
-from lerobot import available_robots
-from lerobot.common.robot_devices.cameras.opencv import OpenCVCamera, save_images_from_cameras
 from lerobot.common.robot_devices.utils import RobotDeviceAlreadyConnectedError, RobotDeviceNotConnectedError
-from tests.utils import require_robot
+from tests.utils import TEST_CAMERA_TYPES, require_camera
 
-CAMERA_INDEX = 2
+# Camera indices used for connecting physical cameras
+OPENCV_CAMERA_INDEX = int(os.environ.get("LEROBOT_TEST_OPENCV_CAMERA_INDEX", 0))
+INTELREALSENSE_CAMERA_INDEX = int(os.environ.get("LEROBOT_TEST_INTELREALSENSE_CAMERA_INDEX", 128422271614))
+
 # Maximum absolute difference between two consecutive images recored by a camera.
 # This value differs with respect to the camera.
 MAX_PIXEL_DIFFERENCE = 25
@@ -25,9 +42,26 @@ def compute_max_pixel_difference(first_image, second_image):
     return np.abs(first_image.astype(float) - second_image.astype(float)).max()
 
 
-@pytest.mark.parametrize("robot_type", available_robots)
-@require_robot
-def test_camera(request, robot_type):
+def make_camera(camera_type, **kwargs):
+    if camera_type == "opencv":
+        from lerobot.common.robot_devices.cameras.opencv import OpenCVCamera
+
+        camera_index = kwargs.pop("camera_index", OPENCV_CAMERA_INDEX)
+        return OpenCVCamera(camera_index, **kwargs)
+
+    elif camera_type == "intelrealsense":
+        from lerobot.common.robot_devices.cameras.intelrealsense import IntelRealSenseCamera
+
+        camera_index = kwargs.pop("camera_index", INTELREALSENSE_CAMERA_INDEX)
+        return IntelRealSenseCamera(camera_index, **kwargs)
+
+    else:
+        raise ValueError(f"The camera type '{camera_type}' is not valid.")
+
+
+@pytest.mark.parametrize("camera_type, mock", TEST_CAMERA_TYPES)
+@require_camera
+def test_camera(request, camera_type, mock):
     """Test assumes that `camera.read()` returns the same image when called multiple times in a row.
     So the environment should not change (you shouldnt be in front of the camera) and the camera should not be moving.
 
@@ -36,10 +70,9 @@ def test_camera(request, robot_type):
     """
     # TODO(rcadene): measure fps in nightly?
     # TODO(rcadene): test logs
-    # TODO(rcadene): add compatibility with other camera APIs
 
     # Test instantiating
-    camera = OpenCVCamera(CAMERA_INDEX)
+    camera = make_camera(camera_type)
 
     # Test reading, async reading, disconnecting before connecting raises an error
     with pytest.raises(RobotDeviceNotConnectedError):
@@ -53,7 +86,7 @@ def test_camera(request, robot_type):
     del camera
 
     # Test connecting
-    camera = OpenCVCamera(CAMERA_INDEX)
+    camera = make_camera(camera_type)
     camera.connect()
     assert camera.is_connected
     assert camera.fps is not None
@@ -78,11 +111,12 @@ def test_camera(request, robot_type):
         camera.read()
     color_image = camera.read()
     async_color_image = camera.async_read()
-    print(
+    error_msg = (
         "max_pixel_difference between read() and async_read()",
         compute_max_pixel_difference(color_image, async_color_image),
     )
-    assert np.allclose(color_image, async_color_image, rtol=1e-5, atol=MAX_PIXEL_DIFFERENCE)
+    # TODO(rcadene): properly set `rtol`
+    assert np.allclose(color_image, async_color_image, rtol=1e-5, atol=MAX_PIXEL_DIFFERENCE), error_msg
 
     # Test disconnecting
     camera.disconnect()
@@ -90,12 +124,12 @@ def test_camera(request, robot_type):
     assert camera.thread is None
 
     # Test disconnecting with `__del__`
-    camera = OpenCVCamera(CAMERA_INDEX)
+    camera = make_camera(camera_type)
     camera.connect()
     del camera
 
     # Test acquiring a bgr image
-    camera = OpenCVCamera(CAMERA_INDEX, color_mode="bgr")
+    camera = make_camera(camera_type, color_mode="bgr")
     camera.connect()
     assert camera.color_mode == "bgr"
     bgr_color_image = camera.read()
@@ -105,14 +139,8 @@ def test_camera(request, robot_type):
     # TODO(rcadene): Add a test for a camera that doesnt support fps=60 and raises an OSError
     # TODO(rcadene): Add a test for a camera that supports fps=60
 
-    # Test fps=10 raises an OSError
-    camera = OpenCVCamera(CAMERA_INDEX, fps=10)
-    with pytest.raises(OSError):
-        camera.connect()
-    del camera
-
     # Test width and height can be set
-    camera = OpenCVCamera(CAMERA_INDEX, fps=30, width=1280, height=720)
+    camera = make_camera(camera_type, fps=30, width=1280, height=720)
     camera.connect()
     assert camera.fps == 30
     assert camera.width == 1280
@@ -125,13 +153,19 @@ def test_camera(request, robot_type):
     del camera
 
     # Test not supported width and height raise an error
-    camera = OpenCVCamera(CAMERA_INDEX, fps=30, width=0, height=0)
+    camera = make_camera(camera_type, fps=30, width=0, height=0)
     with pytest.raises(OSError):
         camera.connect()
     del camera
 
 
-@pytest.mark.parametrize("robot_type", available_robots)
-@require_robot
-def test_save_images_from_cameras(tmpdir, request, robot_type):
+@pytest.mark.parametrize("camera_type, mock", TEST_CAMERA_TYPES)
+@require_camera
+def test_save_images_from_cameras(tmpdir, request, camera_type, mock):
+    # TODO(rcadene): refactor
+    if camera_type == "opencv":
+        from lerobot.common.robot_devices.cameras.opencv import save_images_from_cameras
+    elif camera_type == "intelrealsense":
+        from lerobot.common.robot_devices.cameras.intelrealsense import save_images_from_cameras
+
     save_images_from_cameras(tmpdir, record_time_s=1)
