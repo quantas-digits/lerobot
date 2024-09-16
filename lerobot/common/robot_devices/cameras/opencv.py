@@ -261,6 +261,9 @@ class OpenCVCamera:
         else:
             self.camera = cv2.VideoCapture(self.camera_index)
 
+        if not self.camera.isOpened():
+            raise OSError(f"Camera {self.camera_index} could not be opened.")
+
         if self.fps is not None:
             self.camera.set(cv2.CAP_PROP_FPS, self.fps)
         if self.width is not None:
