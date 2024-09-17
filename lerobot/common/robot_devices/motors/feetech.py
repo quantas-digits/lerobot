@@ -7,12 +7,12 @@ from copy import deepcopy
 
 import numpy as np
 import tqdm
-from dynamixel_sdk import (
+from scservo_sdk import (
     COMM_SUCCESS,
-    DXL_HIBYTE,
-    DXL_HIWORD,
-    DXL_LOBYTE,
-    DXL_LOWORD,
+    SCS_HIBYTE,
+    SCS_HIWORD,
+    SCS_LOBYTE,
+    SCS_LOWORD,
     GroupSyncRead,
     GroupSyncWrite,
     PacketHandler,
@@ -22,7 +22,7 @@ from dynamixel_sdk import (
 from lerobot.common.robot_devices.utils import RobotDeviceAlreadyConnectedError, RobotDeviceNotConnectedError
 from lerobot.common.utils.utils import capture_timestamp_utc
 
-PROTOCOL_VERSION = 2.0
+PROTOCOL_VERSION = 0
 BAUDRATE = 1_000_000
 TIMEOUT_MS = 1000
 
@@ -44,110 +44,83 @@ UPPER_BOUND_LINEAR = 110
 
 HALF_TURN_DEGREE = 180
 
-# https://emanual.robotis.com/docs/en/dxl/x/xl330-m077
-# https://emanual.robotis.com/docs/en/dxl/x/xl330-m288
-# https://emanual.robotis.com/docs/en/dxl/x/xl430-w250
-# https://emanual.robotis.com/docs/en/dxl/x/xm430-w350
-# https://emanual.robotis.com/docs/en/dxl/x/xm540-w270
-# https://emanual.robotis.com/docs/en/dxl/x/xc430-w150
 
 # data_name: (address, size_byte)
-X_SERIES_CONTROL_TABLE = {
-    "Model_Number": (0, 2),
-    "Model_Information": (2, 4),
-    "Firmware_Version": (6, 1),
-    "ID": (7, 1),
-    "Baud_Rate": (8, 1),
-    "Return_Delay_Time": (9, 1),
-    "Drive_Mode": (10, 1),
-    "Operating_Mode": (11, 1),
-    "Secondary_ID": (12, 1),
-    "Protocol_Type": (13, 1),
-    "Homing_Offset": (20, 4),
-    "Moving_Threshold": (24, 4),
-    "Temperature_Limit": (31, 1),
-    "Max_Voltage_Limit": (32, 2),
-    "Min_Voltage_Limit": (34, 2),
-    "PWM_Limit": (36, 2),
-    "Current_Limit": (38, 2),
-    "Acceleration_Limit": (40, 4),
-    "Velocity_Limit": (44, 4),
-    "Max_Position_Limit": (48, 4),
-    "Min_Position_Limit": (52, 4),
-    "Shutdown": (63, 1),
-    "Torque_Enable": (64, 1),
-    "LED": (65, 1),
-    "Status_Return_Level": (68, 1),
-    "Registered_Instruction": (69, 1),
-    "Hardware_Error_Status": (70, 1),
-    "Velocity_I_Gain": (76, 2),
-    "Velocity_P_Gain": (78, 2),
-    "Position_D_Gain": (80, 2),
-    "Position_I_Gain": (82, 2),
-    "Position_P_Gain": (84, 2),
-    "Feedforward_2nd_Gain": (88, 2),
-    "Feedforward_1st_Gain": (90, 2),
-    "Bus_Watchdog": (98, 1),
-    "Goal_PWM": (100, 2),
-    "Goal_Current": (102, 2),
-    "Goal_Velocity": (104, 4),
-    "Profile_Acceleration": (108, 4),
-    "Profile_Velocity": (112, 4),
-    "Goal_Position": (116, 4),
-    "Realtime_Tick": (120, 2),
-    "Moving": (122, 1),
-    "Moving_Status": (123, 1),
-    "Present_PWM": (124, 2),
-    "Present_Current": (126, 2),
-    "Present_Velocity": (128, 4),
-    "Present_Position": (132, 4),
-    "Velocity_Trajectory": (136, 4),
-    "Position_Trajectory": (140, 4),
-    "Present_Input_Voltage": (144, 2),
-    "Present_Temperature": (146, 1),
+SCS_SERIES_CONTROL_TABLE = {
+    "Model": (3, 2),
+    "ID": (5, 1),
+    "Baud_Rate": (6, 1),
+    "Return_Delay": (7, 1),
+    "Response_Status_Level": (8, 1),
+    "Min_Angle_Limit": (9, 2),
+    "Max_Angle_Limit": (11, 2),
+    "Max_Temperature_Limit": (13, 1),
+    "Max_Voltage_Limit": (14, 1),
+    "Min_Voltage_Limit": (15, 1),
+    "Max_Torque_Limit": (16, 2),
+    "Phase": (18, 1),
+    "Unloading_Condition": (19, 1),
+    "LED_Alarm_Condition": (20, 1),
+    "P_Coefficient": (21, 1),
+    "D_Coefficient": (22, 1),
+    "I_Coefficient": (23, 1),
+    "Minimum_Startup_Force": (24, 2),
+    "CW_Dead_Zone": (26, 1),
+    "CCW_Dead_Zone": (27, 1),
+    "Protection_Current": (28, 2),
+    "Angular_Resolution": (30, 1),
+    "Offset": (31, 2),
+    "Mode": (33, 1),
+    "Protective_Torque": (34, 1),
+    "Protection_Time": (35, 1),
+    "Overload_Torque": (36, 1),
+    "Speed_closed_loop_P_proportional_coefficient": (37, 1),
+    "Over_Current_Protection_Time": (38, 1),
+    "Velocity_closed_loop_I_integral_coefficient": (39, 1),
+    "Torque_Enable": (40, 1),
+    "Acceleration": (41, 1),
+    "Goal_Position": (42, 2),
+    "Goal_Time": (44, 2),
+    "Goal_Speed": (46, 2),
+    "Lock": (55, 1),
+    "Present_Position": (56, 2),
+    "Present_Speed": (58, 2),
+    "Present_Load": (60, 2),
+    "Present_Voltage": (62, 1),
+    "Present_Temperature": (63, 1),
+    "Status": (65, 1),
+    "Moving": (66, 1),
+    "Present_Current": (69, 2),
 }
 
-X_SERIES_BAUDRATE_TABLE = {
-    0: 9_600,
-    1: 57_600,
-    2: 115_200,
-    3: 1_000_000,
-    4: 2_000_000,
-    5: 3_000_000,
-    6: 4_000_000,
+SCS_SERIES_BAUDRATE_TABLE = {
+    0: 1_000_000,
+    1: 500_000,
+    2: 250_000,
+    3: 128_000,
+    4: 115_200,
+    5: 57_600,
+    6: 38_400,
+    7: 19_200,
 }
 
 CALIBRATION_REQUIRED = ["Goal_Position", "Present_Position"]
 CONVERT_UINT32_TO_INT32_REQUIRED = ["Goal_Position", "Present_Position"]
 
+
 MODEL_CONTROL_TABLE = {
-    "x_series": X_SERIES_CONTROL_TABLE,
-    "xl330-m077": X_SERIES_CONTROL_TABLE,
-    "xl330-m288": X_SERIES_CONTROL_TABLE,
-    "xl430-w250": X_SERIES_CONTROL_TABLE,
-    "xm430-w350": X_SERIES_CONTROL_TABLE,
-    "xm540-w270": X_SERIES_CONTROL_TABLE,
-    "xc430-w150": X_SERIES_CONTROL_TABLE,
+    "scs_series": SCS_SERIES_CONTROL_TABLE,
+    "sts3215": SCS_SERIES_CONTROL_TABLE,
 }
 
 MODEL_RESOLUTION = {
-    "x_series": 4096,
-    "xl330-m077": 4096,
-    "xl330-m288": 4096,
-    "xl430-w250": 4096,
-    "xm430-w350": 4096,
-    "xm540-w270": 4096,
-    "xc430-w150": 4096,
+    "scs_series": 4096,
+    "sts3215": 4096,
 }
 
 MODEL_BAUDRATE_TABLE = {
-    "x_series": X_SERIES_BAUDRATE_TABLE,
-    "xl330-m077": X_SERIES_BAUDRATE_TABLE,
-    "xl330-m288": X_SERIES_BAUDRATE_TABLE,
-    "xl430-w250": X_SERIES_BAUDRATE_TABLE,
-    "xm430-w350": X_SERIES_BAUDRATE_TABLE,
-    "xm540-w270": X_SERIES_BAUDRATE_TABLE,
-    "xc430-w150": X_SERIES_BAUDRATE_TABLE,
+    "scs_series": SCS_SERIES_BAUDRATE_TABLE,
+    "sts3215": SCS_SERIES_BAUDRATE_TABLE,
 }
 
 NUM_READ_RETRY = 10
@@ -170,19 +143,19 @@ def convert_to_bytes(value, bytes):
     # already handles it for us.
     if bytes == 1:
         data = [
-            DXL_LOBYTE(DXL_LOWORD(value)),
+            SCS_LOBYTE(SCS_LOWORD(value)),
         ]
     elif bytes == 2:
         data = [
-            DXL_LOBYTE(DXL_LOWORD(value)),
-            DXL_HIBYTE(DXL_LOWORD(value)),
+            SCS_LOBYTE(SCS_LOWORD(value)),
+            SCS_HIBYTE(SCS_LOWORD(value)),
         ]
     elif bytes == 4:
         data = [
-            DXL_LOBYTE(DXL_LOWORD(value)),
-            DXL_HIBYTE(DXL_LOWORD(value)),
-            DXL_LOBYTE(DXL_HIWORD(value)),
-            DXL_HIBYTE(DXL_HIWORD(value)),
+            SCS_LOBYTE(SCS_LOWORD(value)),
+            SCS_HIBYTE(SCS_LOWORD(value)),
+            SCS_LOBYTE(SCS_HIWORD(value)),
+            SCS_HIBYTE(SCS_HIWORD(value)),
         ]
     else:
         raise NotImplementedError(
@@ -257,20 +230,20 @@ class JointOutOfRangeError(Exception):
         super().__init__(self.message)
 
 
-class DynamixelMotorsBus:
-    # TODO(rcadene): Add a script to find the motor indices without DynamixelWizzard2
+class FeetechMotorsBus:
+    # TODO(rcadene): Add a script to find the motor indices without feetechWizzard2
     """
-    The DynamixelMotorsBus class allows to efficiently read and write to the attached motors. It relies on
-    the python dynamixel sdk to communicate with the motors. For more info, see the [Dynamixel SDK Documentation](https://emanual.robotis.com/docs/en/software/dynamixel/dynamixel_sdk/sample_code/python_read_write_protocol_2_0/#python-read-write-protocol-20).
+    The FeetechMotorsBus class allows to efficiently read and write to the attached motors. It relies on
+    the python feetech sdk to communicate with the motors. For more info, see the [feetech SDK Documentation](https://emanual.robotis.com/docs/en/software/feetech/feetech_sdk/sample_code/python_read_write_protocol_2_0/#python-read-write-protocol-20).
 
-    A DynamixelMotorsBus instance requires a port (e.g. `DynamixelMotorsBus(port="/dev/tty.usbmodem575E0031751"`)).
+    A FeetechMotorsBus instance requires a port (e.g. `FeetechMotorsBus(port="/dev/tty.usbmodem575E0031751"`)).
     To find the port, you can run our utility script:
     ```bash
-    python lerobot/common/robot_devices/motors/dynamixel.py
-    >>> Finding all available ports for the DynamixelMotorsBus.
+    python lerobot/common/robot_devices/motors/feetech.py
+    >>> Finding all available ports for the FeetechMotorsBus.
     >>> ['/dev/tty.usbmodem575E0032081', '/dev/tty.usbmodem575E0031751']
-    >>> Remove the usb cable from your DynamixelMotorsBus and press Enter when done.
-    >>> The port of this DynamixelMotorsBus is /dev/tty.usbmodem575E0031751.
+    >>> Remove the usb cable from your FeetechMotorsBus and press Enter when done.
+    >>> The port of this FeetechMotorsBus is /dev/tty.usbmodem575E0031751.
     >>> Reconnect the usb cable.
     ```
 
@@ -280,7 +253,7 @@ class DynamixelMotorsBus:
     motor_index = 6
     motor_model = "xl330-m288"
 
-    motors_bus = DynamixelMotorsBus(
+    motors_bus = FeetechMotorsBus(
         port="/dev/tty.usbmodem575E0031751",
         motors={motor_name: (motor_index, motor_model)},
     )
@@ -326,7 +299,7 @@ class DynamixelMotorsBus:
     def connect(self):
         if self.is_connected:
             raise RobotDeviceAlreadyConnectedError(
-                f"DynamixelMotorsBus({self.port}) is already connected. Do not call `motors_bus.connect()` twice."
+                f"FeetechMotorsBus({self.port}) is already connected. Do not call `motors_bus.connect()` twice."
             )
 
         self.port_handler = PortHandler(self.port)
@@ -338,7 +311,7 @@ class DynamixelMotorsBus:
         except Exception:
             traceback.print_exc()
             print(
-                "\nTry running `python lerobot/common/robot_devices/motors/dynamixel.py` to make sure you are using the correct port.\n"
+                "\nTry running `python lerobot/common/robot_devices/motors/feetech.py` to make sure you are using the correct port.\n"
             )
             raise
 
@@ -408,7 +381,7 @@ class DynamixelMotorsBus:
         self.calibration = calibration
 
     def apply_calibration_autocorrect(self, values: np.ndarray | list, motor_names: list[str] | None):
-        """This function applies the calibration, automatically detects out of range errors for motors values and attempts to correct.
+        """This function apply the calibration, automatically detects out of range errors for motors values and attempt to correct.
 
         For more info, see docstring of `apply_calibration` and `autocorrect_calibration`.
         """
@@ -428,7 +401,7 @@ class DynamixelMotorsBus:
         rotate more than a half a turn from the zero position. However, most motors can't rotate more than 180 degrees and will stay in this range.
 
         Joints values are original in [0, 2**32[ (unsigned int32). Each motor are expected to complete a full rotation
-        when given a goal position that is + or - their resolution. For instance, dynamixel xl330-m077 have a resolution of 4096, and
+        when given a goal position that is + or - their resolution. For instance, feetech xl330-m077 have a resolution of 4096, and
         at any position in their original range, let's say the position 56734, they complete a full rotation clockwise by moving to 60830,
         or anticlockwise by moving to 52638. The position in the original range is arbitrary and might change a lot between each motor.
         To harmonize between motors of the same model, different robots, or even models of different brands, we propose to work
@@ -456,13 +429,12 @@ class DynamixelMotorsBus:
                 if drive_mode:
                     values[i] *= -1
 
-                # Convert from range [-2**31, 2**31] to
-                # nominal range [-resolution//2, resolution//2] (e.g. [-2048, 2048])
+                # Convert from range [-2**31, 2**31[ to
+                # nominal range ]-resolution, resolution[ (e.g. ]-2048, 2048[)
                 values[i] += homing_offset
 
-                # Convert from range [-resolution//2, resolution//2] to
-                # universal float32 centered degree range [-180, 180]
-                # (e.g. 2048 / (4096 // 2) * 180 = 180)
+                # Convert from range ]-resolution, resolution[ to
+                # universal float32 centered degree range ]-180, 180[
                 values[i] = values[i] / (resolution // 2) * HALF_TURN_DEGREE
 
                 if (values[i] < LOWER_BOUND_DEGREE) or (values[i] > UPPER_BOUND_DEGREE):
@@ -504,8 +476,8 @@ class DynamixelMotorsBus:
 
         Known issues:
         #1: Motor value randomly shifts of a full turn, caused by hardware/connection errors.
-        #2: Motor internal homing offset is shifted by a full turn, caused by using default calibration (e.g Aloha).
-        #3: motor internal homing offset is shifted by less or more than a full turn, caused by using default calibration
+        #2: Motor internal homing offset is shifted of a full turn, caused by using default calibration (e.g Aloha).
+        #3: motor internal homing offset is shifted of less or more than a full turn, caused by using default calibration
             or by human error during manual calibration.
 
         Issues #1 and #2 can be solved by shifting the calibration homing offset by a full turn.
@@ -530,9 +502,6 @@ class DynamixelMotorsBus:
                 _, model = self.motors[name]
                 resolution = self.model_resolution[model]
 
-                # Update direction of rotation of the motor to match between leader and follower.
-                # In fact, the motor of the leader for a given joint can be assembled in an
-                # opposite direction in term of rotation than the motor of the follower on the same joint.
                 if drive_mode:
                     values[i] *= -1
 
@@ -543,9 +512,13 @@ class DynamixelMotorsBus:
                 # Solve this inequality to find the factor to shift the range into [-180, 180] degrees
                 # values[i] = (values[i] + homing_offset + resolution * factor) / (resolution // 2) * HALF_TURN_DEGREE
                 # - HALF_TURN_DEGREE <= (values[i] + homing_offset + resolution * factor) / (resolution // 2) * HALF_TURN_DEGREE <= HALF_TURN_DEGREE
-                # (- (resolution // 2) - values[i] - homing_offset) / resolution <= factor <= ((resolution // 2) - values[i] - homing_offset) / resolution
-                low_factor = (-(resolution // 2) - values[i] - homing_offset) / resolution
-                upp_factor = ((resolution // 2) - values[i] - homing_offset) / resolution
+                # (- HALF_TURN_DEGREE / HALF_TURN_DEGREE * (resolution // 2) - values[i] - homing_offset) / resolution <= factor <= (HALF_TURN_DEGREE / 180 * (resolution // 2) - values[i] - homing_offset) / resolution
+                low_factor = (
+                    -HALF_TURN_DEGREE / HALF_TURN_DEGREE * (resolution // 2) - values[i] - homing_offset
+                ) / resolution
+                upp_factor = (
+                    HALF_TURN_DEGREE / HALF_TURN_DEGREE * (resolution // 2) - values[i] - homing_offset
+                ) / resolution
 
             elif CalibrationMode[calib_mode] == CalibrationMode.LINEAR:
                 start_pos = self.calibration["start_pos"][calib_idx]
@@ -662,7 +635,7 @@ class DynamixelMotorsBus:
     def read(self, data_name, motor_names: str | list[str] | None = None):
         if not self.is_connected:
             raise RobotDeviceNotConnectedError(
-                f"DynamixelMotorsBus({self.port}) is not connected. You need to run `motors_bus.connect()`."
+                f"FeetechMotorsBus({self.port}) is not connected. You need to run `motors_bus.connect()`."
             )
 
         start_time = time.perf_counter()
@@ -748,7 +721,7 @@ class DynamixelMotorsBus:
     def write(self, data_name, values: int | float | np.ndarray, motor_names: str | list[str] | None = None):
         if not self.is_connected:
             raise RobotDeviceNotConnectedError(
-                f"DynamixelMotorsBus({self.port}) is not connected. You need to run `motors_bus.connect()`."
+                f"FeetechMotorsBus({self.port}) is not connected. You need to run `motors_bus.connect()`."
             )
 
         start_time = time.perf_counter()
@@ -812,7 +785,7 @@ class DynamixelMotorsBus:
     def disconnect(self):
         if not self.is_connected:
             raise RobotDeviceNotConnectedError(
-                f"DynamixelMotorsBus({self.port}) is not connected. Try running `motors_bus.connect()` first."
+                f"FeetechMotorsBus({self.port}) is not connected. Try running `motors_bus.connect()` first."
             )
 
         if self.port_handler is not None:
